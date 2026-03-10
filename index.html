@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>惡夢狼生存挑戰 - 無阻礙狩獵</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+            color: #eee;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            touch-action: none;
+        }
+        #gameCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            display: block;
+            z-index: 1;
+        }
+        .ui-overlay {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .leaderboard-overlay {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            text-align: right;
+            pointer-events: none;
+            background: rgba(0, 0, 0, 0.6);
+            padding: 12px;
+            border-radius: 8px;
+            border-right: 4px solid #f59e0b;
+            backdrop-filter: blur(4px);
+            z-index: 10;
+        }
+        .game-over {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(30, 0, 0, 0.98);
+            padding: 3rem;
+            border-radius: 1rem;
+            border: 4px solid #ff0000;
+            text-align: center;
+            display: none;
+            z-index: 100;
+            box-shadow: 0 0 50px rgba(255, 0, 0, 0.5);
+        }
+        .difficulty-up {
+            animation: glitch 0.5s infinite;
+            color: #fff !important;
+            text-shadow: 2px 2px #ff0000, -2px -2px #0000ff;
+        }
+        @keyframes glitch {
+            0% { transform: translate(2px, 2px); }
+            20% { transform: translate(-2px, -2px); }
+            40% { transform: translate(2px, -2px); }
+            60% { transform: translate(-2px, 2px); }
+            80% { transform: translate(2px, 2px); }
+            100% { transform: translate(0, 0); }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="ui-overlay">
+        <h1 class="text-3xl font-black text-red-600 tracking-tighter italic">NIGHTMARE: PATHFINDING</h1>
+        <div class="flex flex-col gap-1 mt-2">
+            <p class="text-lg font-mono">生存時間: <span id="timer" class="text-white">0.0</span>s</p>
+            <p id="difficultyDisplay" class="text-xl font-black text-red-500 uppercase">LV. 1 - 群體狩獵中</p>
+        </div>
+        <p class="text-xs mt-4 text-gray-400 font-bold uppercase">操作：WASD 或 點擊移動 | 狼群已學會智慧繞路</p>
+    </div>
+
+    <div class="leaderboard-overlay">
+        <p class="text-xs text-gray-400 font-bold uppercase tracking-widest mb-1">最高紀錄</p>
+        <div id="leaderboardList" class="flex flex-col gap-0">
+            <p class="text-xl font-black text-yellow-500 italic">1ST: <span id="score-0">0.0</span>s</p>
+            <p class="text-sm font-bold text-gray-300 italic">2ND: <span id="score-1">0.0</span>s</p>
+            <p class="text-sm font-bold text-gray-400 italic">3RD: <span id="score-2">0.0</span>s</p>
+        </div>
+    </div>
+
+    <div id="gameOverScreen" class="game-over">
+        <h2 class="text-6xl font-black text-white mb-4 italic">你被撕碎了</h2>
+        <p class="text-2xl mb-8 font-mono">你在瘋狂狼群中掙扎了 <span id="finalTime" class="text-red-500">0</span> 秒</p>
+        <button onclick="resetGame()" class="bg-white hover:bg-red-600 hover:text-white text-black px-12 py-4 rounded-none font-black transition-all pointer-events-auto text-xl uppercase italic">
+            再次挑戰
+        </button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const timerEl = document.getElementById('timer');
+        const finalTimeEl = document.getElementById('finalTime');
+        const difficultyEl = document.getElementById('difficultyDisplay');
+        const gameOverScreen = document.getElementById('gameOverScreen');
+
+        // 核心配置
+        const WOLF_COUNT = 8;
+        const TREE_COUNT = 10; 
+        const SWAMP_COUNT = 5; 
+        const SPEED_INCREASE_INTERVAL = 10; 
+        const SWAMP_SLOW_FACTOR = 0.4; 
+
+        // 遊戲狀態
+        let gameActive = false;
+        let startTime = Date.now();
+        let currentTime = 0;
+        let currentLevel = 1;
+        
+        // --- 外掛變數 (隱藏功能) ---
+        let slowMotionFactor = 1.0; 
+        let isInvincible = false; 
+        
+        let highScores = JSON.parse(localStorage.getItem('wolf_game_leaderboard')) || [0, 0, 0];
+
+        function updateLeaderboardUI() {
+            highScores.forEach((score, index) => {
+                const el = document.getElementById(`score-${index}`);
+                if (el) el.innerText = parseFloat(score).toFixed(1);
+            });
+        }
+
+        const player = {
+            x: 0,
+            y: 0,
+            radius: 8,
+            baseSpeed: 5.0,
+            color: '#00ffff',
+            vx: 0,
+            vy: 0,
+            target: { x: 0, y: 0 },
+            isMovingToTarget: false
+        };
+
+        let wolves = [];
+        let trees = [];
+        let swamps = [];
+
+        function initEntities() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+
+            currentLevel = 1;
+            currentTime = 0;
+            startTime = Date.now();
+            difficultyEl.innerText = `LV. 1 - 群體狩獵中`;
+            difficultyEl.classList.remove('difficulty-up');
+            
+            // 重置外掛狀態
+            slowMotionFactor = 1.0;
+            isInvincible = false;
+            
+            swamps = [];
+            for (let i = 0; i < SWAMP_COUNT; i++) {
+                swamps.push({
+                    x: Math.random() * canvas.width,
+                    y: Math.random() * canvas.height,
+                    radius: 60 + Math.random() * 60
+                });
+            }
+
+            trees = [];
+            for (let i = 0; i < TREE_COUNT; i++) {
+                let treeX, treeY, treeRadius;
+                let isValid = false;
+                let attempts = 0;
+                while(!isValid && attempts < 50) {
+                    treeX = Math.random() * canvas.width;
+                    treeY = Math.random() * canvas.height;
+                    treeRadius = 25 + Math.random() * 30;
+                    const dx = treeX - canvas.width / 2;
+                    const dy = treeY - canvas.height / 2;
+                    if (Math.sqrt(dx*dx + dy*dy) > 150) isValid = true;
+                    attempts++;
+                }
+                trees.push({ x: treeX, y: treeY, radius: treeRadius });
+            }
+
+            wolves = [];
+            for (let i = 0; i < WOLF_COUNT; i++) {
+                spawnWolf(i);
+            }
+
+            player.x = canvas.width / 2;
+            player.y = canvas.height / 2;
+            player.vx = 0;
+            player.vy = 0;
+
+            updateLeaderboardUI();
+            gameActive = true;
+        }
+
+        function spawnWolf(index) {
+            let wx, wy;
+            const side = Math.floor(Math.random() * 4);
+            if (side === 0) { wx = -50; wy = Math.random() * canvas.height; }
+            else if (side === 1) { wx = canvas.width + 50; wy = Math.random() * canvas.height; }
+            else if (side === 2) { wx = Math.random() * canvas.width; wy = -50; }
+            else { wx = Math.random() * canvas.width; wy = canvas.height + 50; }
+
+            wolves.push({
+                id: index,
+                x: wx,
+                y: wy,
+                radius: 12,
+                baseSpeed: 3.1 + Math.random() * 1.5,
+                currentSpeed: 3.4,
+                teleportChance: 0.005,
+                color: '#ff0000',
+                trail: [],
+                personality: index % 3,
+                avoidDir: Math.random() < 0.5 ? 1 : -1,
+                lastAvoidToggle: 0
+            });
+        }
+
+        // --- 輸入監聽：加入外掛快捷鍵 ---
+        const keys = {};
+        window.addEventListener('keydown', e => { 
+            const key = e.key.toLowerCase();
+            keys[key] = true; 
+            player.isMovingToTarget = false;
+            
+            // 外掛功能鍵
+            if (key === 'p') slowMotionFactor = 0.2; // 慢動作
+            if (key === 'o') isInvincible = true;    // 無敵開
+            if (key === 'l') isInvincible = false;   // 無敵關
+        });
+        
+        window.addEventListener('keyup', e => { 
+            const key = e.key.toLowerCase();
+            keys[key] = false; 
+            if (key === 'p') slowMotionFactor = 1.0; // 恢復正常速
+        });
+
+        window.addEventListener('mousedown', e => { 
+            player.isMovingToTarget = true; 
+            player.target.x = e.clientX; 
+            player.target.y = e.clientY; 
+        });
+        window.addEventListener('mousemove', e => { 
+            if (player.isMovingToTarget) { 
+                player.target.x = e.clientX; 
+                player.target.y = e.clientY; 
+            } 
+        });
+
+        function checkInSwamp(x, y) {
+            for (let i = 0; i < swamps.length; i++) {
+                const s = swamps[i];
+                const dx = x - s.x;
+                const dy = y - s.y;
+                if (dx*dx + dy*dy < s.radius * s.radius) return true;
+            }
+            return false;
+        }
+
+        function checkCircleCollision(x, y, radius) {
+            for (let i = 0; i < trees.length; i++) {
+                const t = trees[i];
+                const dx = x - t.x;
+                const dy = y - t.y;
+                const distSq = dx*dx + dy*dy;
+                const minSafeDist = radius + t.radius;
+                if (distSq < minSafeDist * minSafeDist) {
+                    return { hit: true, tree: t, dist: Math.sqrt(distSq) };
+                }
+            }
+            return { hit: false };
+        }
+
+        function updatePlayer() {
+            const prevX = player.x;
+            const prevY = player.y;
+            let nextX = player.x;
+            let nextY = player.y;
+
+            const currentMoveSpeed = checkInSwamp(player.x, player.y) ? player.baseSpeed * SWAMP_SLOW_FACTOR : player.baseSpeed;
+
+            if (player.isMovingToTarget) {
+                const dx = player.target.x - player.x;
+                const dy = player.target.y - player.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist > 5) {
+                    nextX += (dx / dist) * currentMoveSpeed;
+                    nextY += (dy / dist) * currentMoveSpeed;
+                }
+            } else {
+                if (keys['w'] || keys['arrowup']) nextY -= currentMoveSpeed;
+                if (keys['s'] || keys['arrowdown']) nextY += currentMoveSpeed;
+                if (keys['a'] || keys['arrowleft']) nextX -= currentMoveSpeed;
+                if (keys['d'] || keys['arrowright']) nextX += currentMoveSpeed;
+            }
+
+            // 玩家碰撞處理
+            if (!checkCircleCollision(nextX, player.y, player.radius).hit) player.x = nextX;
+            if (!checkCircleCollision(player.x, nextY, player.radius).hit) player.y = nextY;
+
+            player.x = Math.max(player.radius, Math.min(canvas.width - player.radius, player.x));
+            player.y = Math.max(player.radius, Math.min(canvas.height - player.radius, player.y));
+            
+            player.vx = player.x - prevX;
+            player.vy = player.y - prevY;
+        }
+
+        function updateWolves() {
+            const newLevel = Math.floor(currentTime / SPEED_INCREASE_INTERVAL) + 1;
+            if (newLevel !== currentLevel) {
+                currentLevel = newLevel;
+                difficultyEl.innerText = `LV. ${currentLevel} - ${currentLevel > 5 ? '絕望包圍中' : '群體狩獵中'}`;
+                if (currentLevel > 3) difficultyEl.classList.add('difficulty-up');
+            }
+
+            const speedMultiplier = Math.pow(currentLevel, 1.3) * 1.2;
+
+            wolves.forEach((wolf) => {
+                let tx = player.x;
+                let ty = player.y;
+
+                if (wolf.personality === 1) {
+                    tx = player.x + player.vx * 18;
+                    ty = player.y + player.vy * 18;
+                } else if (wolf.personality === 2) {
+                    const angleToPlayer = Math.atan2(player.y - wolf.y, player.x - wolf.x);
+                    const offsetAngle = (wolf.id % 2 === 0 ? 0.6 : -0.6);
+                    tx = player.x + Math.cos(angleToPlayer + offsetAngle) * 70;
+                    ty = player.y + Math.sin(angleToPlayer + offsetAngle) * 70;
+                }
+
+                const dx = tx - wolf.x;
+                const dy = ty - wolf.y;
+                const distToTarget = Math.sqrt(dx * dx + dy * dy);
+
+                let targetSpeed = (wolf.baseSpeed + speedMultiplier) * slowMotionFactor;
+                const distToRealPlayer = Math.sqrt((player.x - wolf.x)**2 + (player.y - wolf.y)**2);
+                if (distToRealPlayer < 120) targetSpeed *= 1.3; 
+                if (checkInSwamp(wolf.x, wolf.y)) targetSpeed *= SWAMP_SLOW_FACTOR;
+                
+                wolf.currentSpeed = targetSpeed;
+
+                if (distToTarget > 0) {
+                    let desiredVx = (dx / distToTarget) * wolf.currentSpeed;
+                    let desiredVy = (dy / distToTarget) * wolf.currentSpeed;
+
+                    // 智慧避障：探測前方
+                    const lookAheadDist = wolf.currentSpeed * 4; 
+                    const hitInfo = checkCircleCollision(wolf.x + (dx / distToTarget) * lookAheadDist, wolf.y + (dy / distToTarget) * lookAheadDist, wolf.radius);
+                    
+                    if (hitInfo.hit) {
+                        const tree = hitInfo.tree;
+                        const angleToTree = Math.atan2(tree.y - wolf.y, tree.x - wolf.x);
+                        
+                        // 側向繞路
+                        const avoidAngle = angleToTree + (Math.PI / 1.8) * wolf.avoidDir;
+                        desiredVx = Math.cos(avoidAngle) * wolf.currentSpeed;
+                        desiredVy = Math.sin(avoidAngle) * wolf.currentSpeed;
+                        
+                        // 防抖動機制
+                        if (checkCircleCollision(wolf.x + desiredVx * 2, wolf.y + desiredVy * 2, wolf.radius).hit) {
+                            if (Date.now() - wolf.lastAvoidToggle > 500) {
+                                wolf.avoidDir *= -1;
+                                wolf.lastAvoidToggle = Date.now();
+                            }
+                        }
+                    }
+
+                    // 分離力
+                    let sepX = 0, sepY = 0;
+                    wolves.forEach(other => {
+                        if (other === wolf) return;
+                        const dX = wolf.x - other.x, dY = wolf.y - other.y;
+                        const dSq = dX*dX + dY*dY;
+                        if (dSq < 1200 && dSq > 0) {
+                            const d = Math.sqrt(dSq);
+                            sepX += (dX / d) * 0.5;
+                            sepY += (dY / d) * 0.5;
+                        }
+                    });
+
+                    let finalVx = desiredVx + sepX;
+                    let finalVy = desiredVy + sepY;
+
+                    const collisionResult = checkCircleCollision(wolf.x + finalVx, wolf.y + finalVy, wolf.radius);
+                    if (!collisionResult.hit) {
+                        wolf.x += finalVx;
+                        wolf.y += finalVy;
+                    } else {
+                        // 滑行移動
+                        if (!checkCircleCollision(wolf.x + finalVx, wolf.y, wolf.radius).hit) wolf.x += finalVx;
+                        else if (!checkCircleCollision(wolf.x, wolf.y + finalVy, wolf.radius).hit) wolf.y += finalVy;
+                    }
+                }
+
+                // 強制排除邏輯 (Anti-Stuck)
+                const stuckCheck = checkCircleCollision(wolf.x, wolf.y, wolf.radius - 2);
+                if (stuckCheck.hit) {
+                    const t = stuckCheck.tree;
+                    const angle = Math.atan2(wolf.y - t.y, wolf.x - t.x);
+                    const pushDist = (wolf.radius + t.radius + 1);
+                    wolf.x = t.x + Math.cos(angle) * pushDist;
+                    wolf.y = t.y + Math.sin(angle) * pushDist;
+                }
+
+                // 死亡檢測 (考慮無敵模式)
+                if (!isInvincible && distToRealPlayer < player.radius + wolf.radius - 2) {
+                    gameOver();
+                }
+
+                if (Math.random() < 0.25) wolf.trail.push({x: wolf.x, y: wolf.y, alpha: 0.5});
+                wolf.trail.forEach(t => t.alpha -= 0.05);
+                wolf.trail = wolf.trail.filter(t => t.alpha > 0);
+            });
+        }
+
+        function gameOver() {
+            if (!gameActive) return;
+            gameActive = false;
+            highScores.push(currentTime);
+            highScores.sort((a, b) => b - a);
+            highScores = highScores.slice(0, 3);
+            localStorage.setItem('wolf_game_leaderboard', JSON.stringify(highScores));
+            updateLeaderboardUI();
+            gameOverScreen.style.display = 'block';
+            finalTimeEl.innerText = currentTime.toFixed(1);
+        }
+
+        function resetGame() {
+            gameOverScreen.style.display = 'none';
+            initEntities();
+        }
+
+        function draw() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 沼澤
+            swamps.forEach(swamp => {
+                const grad = ctx.createRadialGradient(swamp.x, swamp.y, 0, swamp.x, swamp.y, swamp.radius);
+                grad.addColorStop(0, 'rgba(30, 50, 30, 0.4)');
+                grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+                ctx.beginPath();
+                ctx.arc(swamp.x, swamp.y, swamp.radius, 0, Math.PI * 2);
+                ctx.fillStyle = grad;
+                ctx.fill();
+            });
+
+            // 障礙物
+            trees.forEach(tree => {
+                ctx.beginPath();
+                ctx.arc(tree.x, tree.y, tree.radius, 0, Math.PI * 2);
+                ctx.fillStyle = '#0f0f0f';
+                ctx.fill();
+                ctx.strokeStyle = '#444';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            });
+
+            // 狼群
+            wolves.forEach(wolf => {
+                wolf.trail.forEach(t => {
+                    ctx.beginPath();
+                    ctx.arc(t.x, t.y, wolf.radius * 0.9, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(220, 0, 0, ${t.alpha})`;
+                    ctx.fill();
+                });
+                ctx.beginPath();
+                ctx.arc(wolf.x, wolf.y, wolf.radius, 0, Math.PI * 2);
+                ctx.fillStyle = '#ff1111';
+                ctx.shadowBlur = 10;
+                ctx.shadowColor = '#ff0000';
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            });
+
+            // 玩家
+            ctx.beginPath();
+            ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+            
+            // 外掛提示：無敵時會閃爍
+            if (isInvincible) {
+                ctx.fillStyle = (Math.floor(Date.now() / 100) % 2 === 0) ? '#FFD700' : '#00ffff';
+            } else {
+                ctx.fillStyle = player.color;
+            }
+            
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = isInvincible ? '#FFD700' : '#00ffff';
+            ctx.fill();
+            ctx.shadowBlur = 0;
+        }
+
+        function gameLoop() {
+            if (gameActive) {
+                currentTime = (Date.now() - startTime) / 1000;
+                timerEl.innerText = currentTime.toFixed(1);
+                updatePlayer();
+                updateWolves();
+            }
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        window.addEventListener('load', () => {
+            initEntities();
+            gameLoop();
+        });
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            if (gameActive) initEntities();
+        });
+    </script>
+</body>
+</html>
